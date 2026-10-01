@@ -19,9 +19,9 @@
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_panel_vendor.h>
 
-#define TAG "XINGZHI_CUBE_0_96OLED_WIFI"
+#define TAG "CHAN_ROBOT_WIFI"
 
-class XINGZHI_CUBE_0_96OLED_WIFI : public WifiBoard {
+class CHAN_ROBOT_WIFI : public WifiBoard {
 private:
     i2c_master_bus_handle_t display_i2c_bus_;
     Button boot_button_;
@@ -230,7 +230,7 @@ private:
     }
 
 public:
-    XINGZHI_CUBE_0_96OLED_WIFI() :
+    CHAN_ROBOT_WIFI() :
         boot_button_(BOOT_BUTTON_GPIO),
         volume_up_button_(VOLUME_UP_BUTTON_GPIO),
         volume_down_button_(VOLUME_DOWN_BUTTON_GPIO) {
@@ -278,4 +278,4 @@ public:
     }
 };
 
-DECLARE_BOARD(XINGZHI_CUBE_0_96OLED_WIFI);
+DECLARE_BOARD(CHAN_ROBOT_WIFI);

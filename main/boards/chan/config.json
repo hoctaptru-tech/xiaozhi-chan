@@ -1,10 +1,9 @@
 {
-    "manufacturer": "nologo",
-    "type": "xingzhi-cube-0.96oled-wifi-music",
+    "type": "chan-robot-wifi",
     "target": "esp32s3",
     "builds": [
         {
-            "name": "xingzhi-cube-0.96oled-wifi-music",
+            "name": "chan-robot-wifi",
             "sdkconfig_append": []
         }
     ]

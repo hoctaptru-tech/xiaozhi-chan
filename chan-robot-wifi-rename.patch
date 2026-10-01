@@ -1,0 +1,70 @@
+--- a/main/Kconfig.projbuild	2026-10-01 07:15:38.810147126 +0000
++++ b/main/Kconfig.projbuild	2026-10-01 07:15:38.815464692 +0000
+@@ -389,8 +389,8 @@
+     config BOARD_TYPE_XINGZHI_CUBE_0_85TFT_ML307
+         bool "Nologo Xingzhi Cube 0.85-inch TFT ML307 (无名科技星智)"
+         depends on IDF_TARGET_ESP32S3
+-    config BOARD_TYPE_XINGZHI_CUBE_0_96OLED_WIFI_MUSIC
+-        bool "Xingzhi Cube 0.96-inch OLED Wi-Fi + Motor + Music (custom)"
++    config BOARD_TYPE_CHAN_ROBOT_WIFI
++        bool "Chan Robot (ESP32-S3, 0.96-inch OLED, Wi-Fi, DRV8833 motors)"
+         depends on IDF_TARGET_ESP32S3
+     config BOARD_TYPE_XINGZHI_CUBE_0_85TFT_WIFI
+         bool "Nologo Xingzhi Cube 0.85-inch TFT Wi-Fi (无名科技星智)"
+--- a/main/CMakeLists.txt	2026-10-01 07:15:38.810188209 +0000
++++ b/main/CMakeLists.txt	2026-10-01 07:15:38.813484857 +0000
+@@ -684,7 +684,7 @@
+     set(BUILTIN_TEXT_FONT font_noto_sans_basic_16_4)
+     set(BUILTIN_ICON_FONT font_material_symbols_16_4)
+     set(DEFAULT_EMOJI_COLLECTION noto-color-emoji_32)
+-elseif(CONFIG_BOARD_TYPE_XINGZHI_CUBE_0_96OLED_WIFI_MUSIC)
++elseif(CONFIG_BOARD_TYPE_CHAN_ROBOT_WIFI)
+     set(BOARD_DIR "chan")
+     set(BUILTIN_TEXT_FONT font_noto_sans_basic_14_1)
+     set(BUILTIN_ICON_FONT font_material_symbols_14_1)
+--- a/main/boards/chan/config.json	2026-10-01 07:15:38.811383081 +0000
++++ b/main/boards/chan/config.json	2026-10-01 07:15:44.689376585 +0000
+@@ -1,10 +1,9 @@
+ {
+-    "manufacturer": "nologo",
+-    "type": "xingzhi-cube-0.96oled-wifi-music",
++    "type": "chan-robot-wifi",
+     "target": "esp32s3",
+     "builds": [
+         {
+-            "name": "xingzhi-cube-0.96oled-wifi-music",
++            "name": "chan-robot-wifi",
+             "sdkconfig_append": []
+         }
+     ]
+--- a/main/boards/chan/robot-ai.cc	2026-10-01 07:15:38.811408792 +0000
++++ b/main/boards/chan/robot-ai.cc	2026-10-01 07:15:38.819186578 +0000
+@@ -19,9 +19,9 @@
+ #include <esp_lcd_panel_ops.h>
+ #include <esp_lcd_panel_vendor.h>
+ 
+-#define TAG "XINGZHI_CUBE_0_96OLED_WIFI"
++#define TAG "CHAN_ROBOT_WIFI"
+ 
+-class XINGZHI_CUBE_0_96OLED_WIFI : public WifiBoard {
++class CHAN_ROBOT_WIFI : public WifiBoard {
+ private:
+     i2c_master_bus_handle_t display_i2c_bus_;
+     Button boot_button_;
+@@ -230,7 +230,7 @@
+     }
+ 
+ public:
+-    XINGZHI_CUBE_0_96OLED_WIFI() :
++    CHAN_ROBOT_WIFI() :
+         boot_button_(BOOT_BUTTON_GPIO),
+         volume_up_button_(VOLUME_UP_BUTTON_GPIO),
+         volume_down_button_(VOLUME_DOWN_BUTTON_GPIO) {
+@@ -278,4 +278,4 @@
+     }
+ };
+ 
+-DECLARE_BOARD(XINGZHI_CUBE_0_96OLED_WIFI);
+\ No newline at end of file
++DECLARE_BOARD(CHAN_ROBOT_WIFI);
+\ No newline at end of file
