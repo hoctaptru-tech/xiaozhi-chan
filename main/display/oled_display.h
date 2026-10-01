@@ -29,12 +29,18 @@ private:
     std::string current_face_;
     bool face_only_ = false;
 
+    // Face-only mode: which face to show depends on the conversation state.
+    enum class FaceState { kOther, kIdle, kConnecting, kListening, kSpeaking };
+    FaceState face_state_ = FaceState::kOther;
+    std::string server_emotion_;  // last emotion sent by the server for this turn
+
     virtual bool Lock(int timeout_ms = 0) override;
     virtual void Unlock() override;
 
     void SetupUI_128x64();
     void SetupUI_128x32();
     bool ShowFaceGif(const char* emotion);
+    void ApplyFace(const char* emotion);
 
 public:
     OledDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel, int width,
@@ -46,6 +52,7 @@ public:
     void SetFaceOnly(bool on) { face_only_ = on; }
 
     virtual void SetupUI() override;
+    virtual void SetStatus(const char* status) override;
     virtual void SetChatMessage(const char* role, const char* content) override;
     virtual void SetEmotion(const char* emotion) override;
     virtual void SetTheme(Theme* theme) override;

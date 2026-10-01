@@ -500,9 +500,73 @@ bool OledDisplay::ShowFaceGif(const char* emotion) {
     return true;
 }
 
-void OledDisplay::SetEmotion(const char* emotion) {
-    if (face_only_ && emoji_image_ != nullptr && ShowFaceGif(emotion)) {
+// ---- Face-only mode: which face for which state (edit the names to taste) ----
+// Names must match a GIF in main/boards/chan/emoji/ (file name without ".gif").
+static const char* const kFaceIdle = "sleepy";          // waiting for the wake word
+static const char* const kFaceConnecting = "surprised";  // just woken up
+static const char* const kFaceListening = "neutral";    // listening to the user
+static const char* const kFaceSpeakingDefault = "happy";  // answering, if the server sent no emotion
+
+void OledDisplay::SetStatus(const char* status) {
+    LvglDisplay::SetStatus(status);
+    if (!face_only_ || status == nullptr) {
         return;
+    }
+    if (strcmp(status, Lang::Strings::STANDBY) == 0) {
+        face_state_ = FaceState::kIdle;
+        server_emotion_.clear();
+    } else if (strcmp(status, Lang::Strings::CONNECTING) == 0) {
+        face_state_ = FaceState::kConnecting;
+        server_emotion_.clear();
+    } else if (strcmp(status, Lang::Strings::LISTENING) == 0) {
+        face_state_ = FaceState::kListening;
+        server_emotion_.clear();
+    } else if (strcmp(status, Lang::Strings::SPEAKING) == 0) {
+        face_state_ = FaceState::kSpeaking;
+        // The application does not set an emotion when it starts speaking,
+        // so pick the face here: the server's emotion if it already arrived.
+        ApplyFace(server_emotion_.empty() ? kFaceSpeakingDefault : server_emotion_.c_str());
+    } else {
+        face_state_ = FaceState::kOther;
+    }
+}
+
+void OledDisplay::ApplyFace(const char* emotion) {
+    const char* face = emotion;
+    switch (face_state_) {
+        case FaceState::kIdle:
+            face = kFaceIdle;
+            break;
+        case FaceState::kConnecting:
+            face = kFaceConnecting;
+            break;
+        case FaceState::kListening:
+            face = kFaceListening;
+            break;
+        default:
+            break;
+    }
+    ShowFaceGif(face);
+}
+
+void OledDisplay::SetEmotion(const char* emotion) {
+    if (face_only_ && emoji_image_ != nullptr) {
+        // The application itself only ever asks for "neutral" outside of speaking,
+        // so any other emotion comes from the server: remember it for the answer.
+        if (strcmp(emotion, "neutral") != 0 && (face_state_ == FaceState::kConnecting ||
+                                                face_state_ == FaceState::kListening ||
+                                                face_state_ == FaceState::kSpeaking)) {
+            server_emotion_ = emotion;
+        }
+        const char* face = emotion;
+        if (face_state_ == FaceState::kSpeaking && strcmp(emotion, "neutral") == 0 &&
+            !server_emotion_.empty()) {
+            face = server_emotion_.c_str();
+        }
+        ApplyFace(face);
+        if (!current_face_.empty()) {
+            return;  // an animated face is showing
+        }
     }
     auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
     const char* utf8 = noto_emoji_get_utf8(emotion);
