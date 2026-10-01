@@ -1,0 +1,264 @@
+--- a/main/CMakeLists.txt	2026-10-01 08:57:21.944538425 +0000
++++ b/main/CMakeLists.txt	2026-10-01 08:57:21.978745077 +0000
+@@ -688,6 +688,7 @@
+     set(BOARD_DIR "chan")
+     set(BUILTIN_TEXT_FONT font_noto_sans_basic_14_1)
+     set(BUILTIN_ICON_FONT font_material_symbols_14_1)
++    set(DEFAULT_EMOJI_COLLECTION chan-emoji)
+ elseif(CONFIG_BOARD_TYPE_XINGZHI_CUBE_0_85TFT_ML307)
+     set(BOARD_DIR "nologo/xingzhi-cube-0.85tft-ml307")
+     set(BUILTIN_TEXT_FONT font_noto_sans_basic_16_4)
+@@ -1315,6 +1316,11 @@
+             "${NOTO_FONTS_PATH}/png/${DEFAULT_EMOJI_COLLECTION}/*"
+         )
+         list(APPEND DEFAULT_ASSETS_DEPENDENCIES ${DEFAULT_EMOJI_FILES})
++        if(DEFAULT_EMOJI_COLLECTION STREQUAL "chan-emoji")
++            file(GLOB CHAN_EMOJI_FILES CONFIGURE_DEPENDS
++                "${CMAKE_CURRENT_SOURCE_DIR}/boards/chan/emoji/*.gif")
++            list(APPEND DEFAULT_ASSETS_DEPENDENCIES ${CHAN_EMOJI_FILES})
++        endif()
+     endif()
+ 
+     # Add default assets extra files if defined
+--- a/scripts/build_default_assets.py	2026-10-01 08:57:21.947502987 +0000
++++ b/scripts/build_default_assets.py	2026-10-01 08:57:21.979135191 +0000
+@@ -793,6 +793,17 @@
+             print("Warning: project_root not provided, cannot locate otto-gif collection")
+             return None
+     
++    # Special handling for the Chan robot board: GIFs live next to the board source
++    if default_emoji_collection == 'chan-emoji':
++        if project_root:
++            chan_emoji_path = os.path.join(project_root, 'main', 'boards', 'chan', 'emoji')
++            if os.path.exists(chan_emoji_path):
++                return chan_emoji_path
++            print(f"Warning: Chan emoji directory not found: {chan_emoji_path}")
++            return None
++        print("Warning: project_root not provided, cannot locate chan-emoji collection")
++        return None
++
+     # Try PNG emoji collections first.
+     emoji_path = os.path.join(noto_fonts_path, 'png', default_emoji_collection)
+     if os.path.exists(emoji_path):
+--- a/main/display/oled_display.h	2026-10-01 08:57:21.950706279 +0000
++++ b/main/display/oled_display.h	2026-10-01 08:57:21.979368954 +0000
+@@ -1,8 +1,12 @@
+ #ifndef OLED_DISPLAY_H
+ #define OLED_DISPLAY_H
+ 
++#include "gif/lvgl_gif.h"
+ #include "lvgl_display.h"
+ 
++#include <memory>
++#include <string>
++
+ #include <esp_lcd_panel_io.h>
+ #include <esp_lcd_panel_ops.h>
+ 
+@@ -20,18 +24,27 @@
+     lv_obj_t* side_bar_ = nullptr;
+     lv_obj_t* emotion_label_ = nullptr;
+     lv_obj_t* chat_message_label_ = nullptr;
++    lv_obj_t* emoji_image_ = nullptr;
++    std::unique_ptr<LvglGif> gif_controller_ = nullptr;
++    std::string current_face_;
++    bool face_only_ = false;
+ 
+     virtual bool Lock(int timeout_ms = 0) override;
+     virtual void Unlock() override;
+ 
+     void SetupUI_128x64();
+     void SetupUI_128x32();
++    bool ShowFaceGif(const char* emotion);
+ 
+ public:
+     OledDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel, int width,
+                 int height, bool mirror_x, bool mirror_y);
+     ~OledDisplay();
+ 
++    // Opt-in: show only an animated face (GIF) on the whole screen.
++    // Must be called before SetupUI(). Only applies to 128x64 panels.
++    void SetFaceOnly(bool on) { face_only_ = on; }
++
+     virtual void SetupUI() override;
+     virtual void SetChatMessage(const char* role, const char* content) override;
+     virtual void SetEmotion(const char* emotion) override;
+--- a/main/display/oled_display.cc	2026-10-01 08:57:21.954371565 +0000
++++ b/main/display/oled_display.cc	2026-10-01 08:58:02.081338951 +0000
+@@ -5,6 +5,7 @@
+ #include "settings.h"
+ 
+ #include <algorithm>
++#include <cstring>
+ #include <string>
+ 
+ #include <esp_err.h>
+@@ -103,6 +104,10 @@
+ }
+ 
+ OledDisplay::~OledDisplay() {
++    if (gif_controller_) {
++        gif_controller_->Stop();
++        gif_controller_.reset();
++    }
+     if (content_ != nullptr) {
+         lv_obj_del(content_);
+     }
+@@ -147,6 +152,9 @@
+ void OledDisplay::Unlock() { lvgl_port_unlock(); }
+ 
+ void OledDisplay::SetChatMessage(const char* role, const char* content) {
++    if (face_only_) {
++        return;  // face-only mode: no chat text on screen
++    }
+     DisplayLockGuard lock(this);
+     if (chat_message_label_ == nullptr) {
+         return;
+@@ -291,6 +299,25 @@
+     lv_obj_set_style_anim_duration(chat_message_label_, lv_anim_speed_clamped(60, 300, 60000),
+                                    LV_PART_MAIN);
+ 
++    if (face_only_) {
++        // Face-only layout: hide status icons, status text and chat text,
++        // and give the whole screen to the animated emoji.
++        lv_obj_add_flag(top_bar_, LV_OBJ_FLAG_HIDDEN);
++        lv_obj_add_flag(status_bar_, LV_OBJ_FLAG_HIDDEN);
++        lv_obj_add_flag(content_right_, LV_OBJ_FLAG_HIDDEN);
++        lv_obj_set_style_border_width(content_, 0, 0);
++        lv_obj_set_size(content_left_, LV_HOR_RES, LV_VER_RES);
++        lv_obj_set_scrollbar_mode(content_left_, LV_SCROLLBAR_MODE_OFF);
++
++        // Fallback glyph (used when no GIF is available) is centered too
++        lv_obj_set_style_pad_top(emotion_label_, 0, 0);
++        lv_obj_center(emotion_label_);
++
++        emoji_image_ = lv_image_create(content_left_);
++        lv_obj_center(emoji_image_);
++        lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);  // shown on first SetEmotion()
++    }
++
+     low_battery_popup_ = lv_obj_create(screen);
+     lv_obj_set_scrollbar_mode(low_battery_popup_, LV_SCROLLBAR_MODE_OFF);
+     lv_obj_set_size(low_battery_popup_, LV_HOR_RES * 0.9, text_font->line_height * 2);
+@@ -392,7 +419,91 @@
+                                    LV_PART_MAIN);
+ }
+ 
++namespace {
++// The server sends ~21 emotion names but the board only ships a few GIFs,
++// so group the rest. Anything unknown falls back to "neutral".
++const char* FaceAlias(const char* emotion) {
++    static const struct {
++        const char* from;
++        const char* to;
++    } kAlias[] = {
++        {"laughing", "happy"},      {"funny", "happy"},         {"silly", "happy"},
++        {"winking", "happy"},       {"cool", "happy"},          {"relaxed", "happy"},
++        {"confident", "happy"},     {"delicious", "happy"},     {"kissy", "happy"},
++        {"crying", "sad"},          {"shocked", "surprised"},   {"confused", "surprised"},
++        {"embarrassed", "surprised"},
++    };
++    for (const auto& a : kAlias) {
++        if (strcmp(emotion, a.from) == 0) {
++            return a.to;
++        }
++    }
++    return "neutral";
++}
++}  // namespace
++
++// Returns true if an animated face was shown (or is already showing).
++bool OledDisplay::ShowFaceGif(const char* emotion) {
++    auto collection = static_cast<LvglTheme*>(current_theme_)->emoji_collection();
++    if (collection == nullptr) {
++        return false;
++    }
++
++    // Exact name first (extra GIFs added later are picked up automatically),
++    // then the grouped alias, then neutral.
++    std::string name = emotion;
++    const LvglImage* image = collection->GetEmojiImage(name.c_str());
++    if (image == nullptr) {
++        name = FaceAlias(emotion);
++        image = collection->GetEmojiImage(name.c_str());
++    }
++    if (image == nullptr) {
++        name = "neutral";
++        image = collection->GetEmojiImage(name.c_str());
++    }
++    if (image == nullptr) {
++        return false;
++    }
++
++    DisplayLockGuard lock(this);
++    if (emoji_image_ == nullptr) {
++        return false;
++    }
++    // Same face already playing: don't restart it (avoids flicker and extra work)
++    if (gif_controller_ && name == current_face_) {
++        return true;
++    }
++    if (gif_controller_) {
++        gif_controller_->Stop();
++        gif_controller_.reset();
++    }
++    current_face_.clear();
++
++    if (image->IsGif()) {
++        gif_controller_ = std::make_unique<LvglGif>(image->image_dsc());
++        if (!gif_controller_->IsLoaded()) {
++            ESP_LOGE(TAG, "Failed to load GIF for emotion: %s", emotion);
++            gif_controller_.reset();
++            return false;
++        }
++        gif_controller_->SetFrameCallback(
++            [this]() { lv_image_set_src(emoji_image_, gif_controller_->image_dsc()); });
++        lv_image_set_src(emoji_image_, gif_controller_->image_dsc());
++        gif_controller_->Start();
++    } else {
++        lv_image_set_src(emoji_image_, image->image_dsc());
++    }
++
++    lv_obj_add_flag(emotion_label_, LV_OBJ_FLAG_HIDDEN);
++    lv_obj_remove_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
++    current_face_ = name;
++    return true;
++}
++
+ void OledDisplay::SetEmotion(const char* emotion) {
++    if (face_only_ && emoji_image_ != nullptr && ShowFaceGif(emotion)) {
++        return;
++    }
+     auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+     const char* utf8 = noto_emoji_get_utf8(emotion);
+     const lv_font_t* emotion_font = lvgl_theme->emoji_font()->font();
+@@ -404,6 +515,16 @@
+     if (emotion_label_ == nullptr) {
+         return;
+     }
++    if (face_only_ && emoji_image_ != nullptr) {
++        // No GIF available: go back to the built-in glyph
++        if (gif_controller_) {
++            gif_controller_->Stop();
++            gif_controller_.reset();
++        }
++        current_face_.clear();
++        lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
++        lv_obj_remove_flag(emotion_label_, LV_OBJ_FLAG_HIDDEN);
++    }
+     if (utf8 != nullptr) {
+         lv_obj_set_style_text_font(emotion_label_, emotion_font, 0);
+         lv_label_set_text(emotion_label_, utf8);
+--- a/main/boards/chan/robot-ai.cc	2026-10-01 08:57:21.958488142 +0000
++++ b/main/boards/chan/robot-ai.cc	2026-10-01 08:58:02.081997812 +0000
+@@ -125,7 +125,9 @@
+         ESP_LOGI(TAG, "Turning display on");
+         ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_, true));
+ 
+-        display_ = new OledDisplay(panel_io_, panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
++        auto* oled = new OledDisplay(panel_io_, panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
++        oled->SetFaceOnly(true);  // animated face fills the screen, no text or status bar
++        display_ = oled;
+     }
+ 
+     void InitializeButtons() {

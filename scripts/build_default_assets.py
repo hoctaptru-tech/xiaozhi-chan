@@ -793,6 +793,17 @@ def get_emoji_collection_path(default_emoji_collection, noto_fonts_path, project
             print("Warning: project_root not provided, cannot locate otto-gif collection")
             return None
     
+    # Special handling for the Chan robot board: GIFs live next to the board source
+    if default_emoji_collection == 'chan-emoji':
+        if project_root:
+            chan_emoji_path = os.path.join(project_root, 'main', 'boards', 'chan', 'emoji')
+            if os.path.exists(chan_emoji_path):
+                return chan_emoji_path
+            print(f"Warning: Chan emoji directory not found: {chan_emoji_path}")
+            return None
+        print("Warning: project_root not provided, cannot locate chan-emoji collection")
+        return None
+
     # Try PNG emoji collections first.
     emoji_path = os.path.join(noto_fonts_path, 'png', default_emoji_collection)
     if os.path.exists(emoji_path):

@@ -688,6 +688,7 @@ elseif(CONFIG_BOARD_TYPE_CHAN_ROBOT_WIFI)
     set(BOARD_DIR "chan")
     set(BUILTIN_TEXT_FONT font_noto_sans_basic_14_1)
     set(BUILTIN_ICON_FONT font_material_symbols_14_1)
+    set(DEFAULT_EMOJI_COLLECTION chan-emoji)
 elseif(CONFIG_BOARD_TYPE_XINGZHI_CUBE_0_85TFT_ML307)
     set(BOARD_DIR "nologo/xingzhi-cube-0.85tft-ml307")
     set(BUILTIN_TEXT_FONT font_noto_sans_basic_16_4)
@@ -1315,6 +1316,11 @@ function(build_default_assets_bin)
             "${NOTO_FONTS_PATH}/png/${DEFAULT_EMOJI_COLLECTION}/*"
         )
         list(APPEND DEFAULT_ASSETS_DEPENDENCIES ${DEFAULT_EMOJI_FILES})
+        if(DEFAULT_EMOJI_COLLECTION STREQUAL "chan-emoji")
+            file(GLOB CHAN_EMOJI_FILES CONFIGURE_DEPENDS
+                "${CMAKE_CURRENT_SOURCE_DIR}/boards/chan/emoji/*.gif")
+            list(APPEND DEFAULT_ASSETS_DEPENDENCIES ${CHAN_EMOJI_FILES})
+        endif()
     endif()
 
     # Add default assets extra files if defined

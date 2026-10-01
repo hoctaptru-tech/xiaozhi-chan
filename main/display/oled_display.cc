@@ -5,6 +5,7 @@
 #include "settings.h"
 
 #include <algorithm>
+#include <cstring>
 #include <string>
 
 #include <esp_err.h>
@@ -103,6 +104,10 @@ void OledDisplay::SetupUI() {
 }
 
 OledDisplay::~OledDisplay() {
+    if (gif_controller_) {
+        gif_controller_->Stop();
+        gif_controller_.reset();
+    }
     if (content_ != nullptr) {
         lv_obj_del(content_);
     }
@@ -147,6 +152,9 @@ bool OledDisplay::Lock(int timeout_ms) { return lvgl_port_lock(timeout_ms); }
 void OledDisplay::Unlock() { lvgl_port_unlock(); }
 
 void OledDisplay::SetChatMessage(const char* role, const char* content) {
+    if (face_only_) {
+        return;  // face-only mode: no chat text on screen
+    }
     DisplayLockGuard lock(this);
     if (chat_message_label_ == nullptr) {
         return;
@@ -291,6 +299,25 @@ void OledDisplay::SetupUI_128x64() {
     lv_obj_set_style_anim_duration(chat_message_label_, lv_anim_speed_clamped(60, 300, 60000),
                                    LV_PART_MAIN);
 
+    if (face_only_) {
+        // Face-only layout: hide status icons, status text and chat text,
+        // and give the whole screen to the animated emoji.
+        lv_obj_add_flag(top_bar_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(status_bar_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(content_right_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_border_width(content_, 0, 0);
+        lv_obj_set_size(content_left_, LV_HOR_RES, LV_VER_RES);
+        lv_obj_set_scrollbar_mode(content_left_, LV_SCROLLBAR_MODE_OFF);
+
+        // Fallback glyph (used when no GIF is available) is centered too
+        lv_obj_set_style_pad_top(emotion_label_, 0, 0);
+        lv_obj_center(emotion_label_);
+
+        emoji_image_ = lv_image_create(content_left_);
+        lv_obj_center(emoji_image_);
+        lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);  // shown on first SetEmotion()
+    }
+
     low_battery_popup_ = lv_obj_create(screen);
     lv_obj_set_scrollbar_mode(low_battery_popup_, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_size(low_battery_popup_, LV_HOR_RES * 0.9, text_font->line_height * 2);
@@ -392,7 +419,91 @@ void OledDisplay::SetupUI_128x32() {
                                    LV_PART_MAIN);
 }
 
+namespace {
+// The server sends ~21 emotion names but the board only ships a few GIFs,
+// so group the rest. Anything unknown falls back to "neutral".
+const char* FaceAlias(const char* emotion) {
+    static const struct {
+        const char* from;
+        const char* to;
+    } kAlias[] = {
+        {"laughing", "happy"},      {"funny", "happy"},         {"silly", "happy"},
+        {"winking", "happy"},       {"cool", "happy"},          {"relaxed", "happy"},
+        {"confident", "happy"},     {"delicious", "happy"},     {"kissy", "happy"},
+        {"crying", "sad"},          {"shocked", "surprised"},   {"confused", "surprised"},
+        {"embarrassed", "surprised"},
+    };
+    for (const auto& a : kAlias) {
+        if (strcmp(emotion, a.from) == 0) {
+            return a.to;
+        }
+    }
+    return "neutral";
+}
+}  // namespace
+
+// Returns true if an animated face was shown (or is already showing).
+bool OledDisplay::ShowFaceGif(const char* emotion) {
+    auto collection = static_cast<LvglTheme*>(current_theme_)->emoji_collection();
+    if (collection == nullptr) {
+        return false;
+    }
+
+    // Exact name first (extra GIFs added later are picked up automatically),
+    // then the grouped alias, then neutral.
+    std::string name = emotion;
+    const LvglImage* image = collection->GetEmojiImage(name.c_str());
+    if (image == nullptr) {
+        name = FaceAlias(emotion);
+        image = collection->GetEmojiImage(name.c_str());
+    }
+    if (image == nullptr) {
+        name = "neutral";
+        image = collection->GetEmojiImage(name.c_str());
+    }
+    if (image == nullptr) {
+        return false;
+    }
+
+    DisplayLockGuard lock(this);
+    if (emoji_image_ == nullptr) {
+        return false;
+    }
+    // Same face already playing: don't restart it (avoids flicker and extra work)
+    if (gif_controller_ && name == current_face_) {
+        return true;
+    }
+    if (gif_controller_) {
+        gif_controller_->Stop();
+        gif_controller_.reset();
+    }
+    current_face_.clear();
+
+    if (image->IsGif()) {
+        gif_controller_ = std::make_unique<LvglGif>(image->image_dsc());
+        if (!gif_controller_->IsLoaded()) {
+            ESP_LOGE(TAG, "Failed to load GIF for emotion: %s", emotion);
+            gif_controller_.reset();
+            return false;
+        }
+        gif_controller_->SetFrameCallback(
+            [this]() { lv_image_set_src(emoji_image_, gif_controller_->image_dsc()); });
+        lv_image_set_src(emoji_image_, gif_controller_->image_dsc());
+        gif_controller_->Start();
+    } else {
+        lv_image_set_src(emoji_image_, image->image_dsc());
+    }
+
+    lv_obj_add_flag(emotion_label_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+    current_face_ = name;
+    return true;
+}
+
 void OledDisplay::SetEmotion(const char* emotion) {
+    if (face_only_ && emoji_image_ != nullptr && ShowFaceGif(emotion)) {
+        return;
+    }
     auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
     const char* utf8 = noto_emoji_get_utf8(emotion);
     const lv_font_t* emotion_font = lvgl_theme->emoji_font()->font();
@@ -403,6 +514,16 @@ void OledDisplay::SetEmotion(const char* emotion) {
     DisplayLockGuard lock(this);
     if (emotion_label_ == nullptr) {
         return;
+    }
+    if (face_only_ && emoji_image_ != nullptr) {
+        // No GIF available: go back to the built-in glyph
+        if (gif_controller_) {
+            gif_controller_->Stop();
+            gif_controller_.reset();
+        }
+        current_face_.clear();
+        lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(emotion_label_, LV_OBJ_FLAG_HIDDEN);
     }
     if (utf8 != nullptr) {
         lv_obj_set_style_text_font(emotion_label_, emotion_font, 0);
