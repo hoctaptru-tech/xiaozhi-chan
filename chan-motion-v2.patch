@@ -1,0 +1,458 @@
+--- a/main/boards/chan/robot-ai.cc	2026-10-02 08:53:15.755475227 +0000
++++ b/main/boards/chan/robot-ai.cc	2026-10-02 08:53:15.812209322 +0000
+@@ -11,9 +11,13 @@
+ #include "power_manager.h"
+ #include "mcp_server.h"
+ #include "motor_controller.h"
++#include "motor_arbiter.h"
++#include "robot_gestures.h"
+ 
+ #include <driver/rtc_io.h>
+ #include <esp_sleep.h>
++#include <esp_timer.h>
++#include <functional>
+ #include <esp_log.h>
+ #include <driver/i2c_master.h>
+ #include <esp_lcd_panel_ops.h>
+@@ -21,6 +25,27 @@
+ 
+ #define TAG "CHAN_ROBOT_WIFI"
+ 
++// Same LED as before, plus a hook so the board learns about every device state change
++// (the application calls Led::OnStateChanged() from its main loop on each change).
++class RobotLed : public SingleLed {
++public:
++    using SingleLed::SingleLed;
++
++    void SetStateCallback(std::function<void(DeviceState)> callback) {
++        state_callback_ = std::move(callback);
++    }
++
++    void OnStateChanged() override {
++        SingleLed::OnStateChanged();
++        if (state_callback_) {
++            state_callback_(Application::GetInstance().GetDeviceState());
++        }
++    }
++
++private:
++    std::function<void(DeviceState)> state_callback_;
++};
++
+ class CHAN_ROBOT_WIFI : public WifiBoard {
+ private:
+     i2c_master_bus_handle_t display_i2c_bus_;
+@@ -33,6 +58,9 @@
+     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
+     esp_lcd_panel_handle_t panel_ = nullptr;
+     MotorController* motor_controller_ = nullptr;
++    MotorArbiter* motor_arbiter_ = nullptr;  // the only thing allowed to drive the motors
++    RobotLed* led_ = nullptr;
++    RobotGestures* gestures_ = nullptr;
+     
+ 
+     void InitializePowerManager() {
+@@ -183,10 +211,34 @@
+             /*invert_left=*/false, /*invert_right=*/false);
+     }
+ 
++    void InitializeGestures() {
++        motor_arbiter_ = new MotorArbiter(motor_controller_, [this]() {
++            return power_manager_ != nullptr && power_manager_->IsCharging();  // docked: no gestures
++        });
++        gestures_ = new RobotGestures(motor_arbiter_);
++        led_ = new RobotLed(BUILTIN_LED_GPIO);
++        led_->SetStateCallback([this](DeviceState state) { gestures_->OnStateChanged(state); });
++    }
++
+     void InitializeTools() {
+         auto& mcp_server = McpServer::GetInstance();
+ 
+         mcp_server.AddTool(
++            "self.robot.set_gestures",
++            "Bat hoac tat cu dong nho cua robot (lac nho khi duoc goi day va luc dang tra loi). "
++            "enabled=false khi nguoi dung muon robot dung yen; enabled=true de bat lai.",
++            PropertyList({
++                Property("enabled", kPropertyTypeBoolean),
++            }),
++            [this](const PropertyList& properties) -> ReturnValue {
++                if (gestures_ == nullptr) {
++                    return false;
++                }
++                gestures_->SetEnabled(properties["enabled"].value<bool>());
++                return true;
++            });
++
++        mcp_server.AddTool(
+             "self.robot.move",
+             "Dieu khien robot di chuyen bang banh xe. Robot co the:\n"
+             "forward: di thang ve phia truoc\nbackward: lui ve sau\n"
+@@ -207,23 +259,25 @@
+                 int speed = properties["speed"].value<int>();
+                 bool continuous = properties["continuous"].value<bool>();
+ 
+-                if (!motor_controller_) {
++                if (!motor_arbiter_) {
+                     return false;
+                 }
+ 
+                 int straight_duration_ms = continuous ? 0 : 800;
+                 int turn_duration_ms = continuous ? 0 : 500;
+ 
++                // All motor access goes through the arbiter (voice commands always win)
++                using Action = MotorArbiter::Action;
+                 if (action == "forward") {
+-                    motor_controller_->Forward(speed, straight_duration_ms);
++                    motor_arbiter_->VoiceDrive(Action::kForward, speed, straight_duration_ms);
+                 } else if (action == "backward") {
+-                    motor_controller_->Backward(speed, straight_duration_ms);
++                    motor_arbiter_->VoiceDrive(Action::kBackward, speed, straight_duration_ms);
+                 } else if (action == "turn_left") {
+-                    motor_controller_->TurnLeft(speed, turn_duration_ms);
++                    motor_arbiter_->VoiceDrive(Action::kTurnLeft, speed, turn_duration_ms);
+                 } else if (action == "turn_right") {
+-                    motor_controller_->TurnRight(speed, turn_duration_ms);
++                    motor_arbiter_->VoiceDrive(Action::kTurnRight, speed, turn_duration_ms);
+                 } else if (action == "stop") {
+-                    motor_controller_->Stop();
++                    motor_arbiter_->VoiceStop();
+                 } else {
+                     return false;
+                 }
+@@ -242,12 +296,12 @@
+         InitializeSsd1306Display();
+         InitializeButtons();
+         InitializeMotor();
++        InitializeGestures();
+         InitializeTools();
+     }
+ 
+     virtual Led* GetLed() override {
+-        static SingleLed led(BUILTIN_LED_GPIO);
+-        return &led;
++        return led_;
+     }
+ 
+     virtual AudioCodec* GetAudioCodec() override {
+--- a/main/boards/chan/motor_controller.h	2026-10-02 08:53:15.753422234 +0000
++++ b/main/boards/chan/motor_controller.h	2026-10-02 08:53:15.795657822 +0000
+@@ -84,6 +84,14 @@
+         ArmAutoStop(duration_ms);
+     }
+ 
++    // Drive both sides independently (-100..100 each) with the auto-stop watchdog.
++    // duration_ms = 0 -> no watchdog (caller must Stop()).
++    void Drive(int left, int right, int duration_ms) {
++        ArmAutoStop(duration_ms);
++        SetLeft(left);
++        SetRight(right);
++    }
++
+     void Stop() {
+         CancelAutoStop();
+         SetLeft(0);
+--- /dev/null	2026-10-01 20:26:30.510497113 +0000
++++ b/main/boards/chan/motor_arbiter.h	2026-10-02 08:53:15.797434961 +0000
+@@ -0,0 +1,150 @@
++#ifndef MOTOR_ARBITER_H
++#define MOTOR_ARBITER_H
++
++#include "motor_controller.h"
++
++#include <algorithm>
++#include <atomic>
++#include <functional>
++#include <mutex>
++#include <utility>
++
++#include <esp_timer.h>
++#include <freertos/FreeRTOS.h>
++#include <freertos/task.h>
++
++// The ONLY object allowed to talk to the MotorController. It exists so that the voice
++// command (MCP "self.robot.move") and the small "body language" gestures can never fight
++// over the motors, which is what causes current spikes and resets:
++//
++//   1. A voice command ALWAYS wins. It takes over at once, and a running gesture notices
++//      and gives up without touching the motors again.
++//   2. After a voice command, gestures stay away until it has finished plus a quiet time.
++//   3. Gestures never run while charging.
++//   4. Every command: speed capped, soft start (ramp), and a short dead time before the
++//      wheels reverse direction, so the battery never sees a sudden full-power jump.
++//   5. "Continuous" can never run forever: it is limited to kMaxContinuousMs.
++//
++// All state is protected by one mutex, so there is no check-then-act race.
++class MotorArbiter {
++public:
++    // ---------------- Tuning ----------------
++    static constexpr int kMaxSpeed = 70;                   // hard cap for every command (0..100)
++    static constexpr int kMaxContinuousMs = 30000;         // safety limit for "continuous"
++    static constexpr int kRampMs = 80;                     // soft start time
++    static constexpr int kReverseDeadMs = 80;              // pause before changing direction
++    static constexpr int64_t kVoiceQuietUs = 6LL * 1000 * 1000;  // gestures wait this long after a voice move
++    // ----------------------------------------
++
++    enum class Action { kForward, kBackward, kTurnLeft, kTurnRight };
++
++    MotorArbiter(MotorController* motor, std::function<bool()> is_charging)
++        : motor_(motor), is_charging_(std::move(is_charging)) {}
++
++    // Voice / MCP command. duration_ms = 0 means "continuous" (still capped).
++    void VoiceDrive(Action action, int speed, int duration_ms) {
++        speed = std::clamp(speed, 0, kMaxSpeed);
++        int left = 0, right = 0;
++        switch (action) {
++            case Action::kForward:   left = speed;  right = speed;  break;
++            case Action::kBackward:  left = -speed; right = -speed; break;
++            case Action::kTurnLeft:  left = -speed; right = speed;  break;
++            case Action::kTurnRight: left = speed;  right = -speed; break;
++        }
++        std::lock_guard<std::mutex> lock(mutex_);
++        epoch_.fetch_add(1);  // preempts any gesture
++        DriveLocked(left, right, duration_ms);
++        const int run_ms = duration_ms > 0 ? duration_ms : kMaxContinuousMs;
++        voice_until_us_ = esp_timer_get_time() + static_cast<int64_t>(run_ms) * 1000 + kVoiceQuietUs;
++    }
++
++    void VoiceStop() {
++        std::lock_guard<std::mutex> lock(mutex_);
++        epoch_.fetch_add(1);
++        StopLocked();
++        voice_until_us_ = esp_timer_get_time() + kVoiceQuietUs;
++    }
++
++    // One gesture step: turn in place (dir < 0 = left, dir > 0 = right) for ms.
++    // Blocks until the step is over. Returns false if it was refused, preempted by a
++    // voice command, or aborted through should_abort (the motors are left alone when a
++    // voice command took over).
++    bool GestureTurn(int dir, int speed, int ms, const std::function<bool()>& should_abort) {
++        uint32_t my_epoch;
++        {
++            std::lock_guard<std::mutex> lock(mutex_);
++            if (esp_timer_get_time() < voice_until_us_ || (is_charging_ && is_charging_())) {
++                return false;
++            }
++            my_epoch = epoch_.load();
++            speed = std::clamp(speed, 0, kMaxSpeed);
++            DriveLocked(dir < 0 ? -speed : speed, dir < 0 ? speed : -speed, ms);
++        }
++
++        const int64_t end_us = esp_timer_get_time() + static_cast<int64_t>(ms) * 1000;
++        while (esp_timer_get_time() < end_us) {
++            if (epoch_.load() != my_epoch) {
++                return false;  // a voice command took over: do not touch the motors
++            }
++            if (should_abort && should_abort()) {
++                std::lock_guard<std::mutex> lock(mutex_);
++                if (epoch_.load() == my_epoch) {
++                    StopLocked();
++                }
++                return false;
++            }
++            vTaskDelay(pdMS_TO_TICKS(10));
++        }
++
++        std::lock_guard<std::mutex> lock(mutex_);
++        if (epoch_.load() != my_epoch) {
++            return false;
++        }
++        StopLocked();
++        return true;
++    }
++
++private:
++    MotorController* motor_;
++    std::function<bool()> is_charging_;
++    std::mutex mutex_;
++    std::atomic<uint32_t> epoch_{0};  // bumped by every voice command
++    int64_t voice_until_us_ = 0;
++    int last_left_ = 0;
++    int last_right_ = 0;
++    int64_t last_drive_end_us_ = 0;
++
++    void StopLocked() {
++        motor_->Stop();
++        last_left_ = 0;
++        last_right_ = 0;
++    }
++
++    // Caller holds mutex_.
++    void DriveLocked(int left, int right, int duration_ms) {
++        const int64_t now = esp_timer_get_time();
++        const bool reversing = (left * last_left_ < 0 || right * last_right_ < 0) &&
++                               now < last_drive_end_us_ + 300000;
++        if (reversing) {
++            StopLocked();
++            vTaskDelay(pdMS_TO_TICKS(kReverseDeadMs));
++        }
++
++        const int run_ms = duration_ms > 0 ? duration_ms : kMaxContinuousMs;
++        // The watchdog is armed first and also covers the soft start, so a stuck caller
++        // can never leave the motors running.
++        motor_->Drive(left * 40 / 100, right * 40 / 100, run_ms + kRampMs);
++        vTaskDelay(pdMS_TO_TICKS(kRampMs / 2));
++        motor_->SetLeft(left * 70 / 100);
++        motor_->SetRight(right * 70 / 100);
++        vTaskDelay(pdMS_TO_TICKS(kRampMs / 2));
++        motor_->SetLeft(left);
++        motor_->SetRight(right);
++
++        last_left_ = left;
++        last_right_ = right;
++        last_drive_end_us_ = esp_timer_get_time() + static_cast<int64_t>(run_ms) * 1000;
++    }
++};
++
++#endif  // MOTOR_ARBITER_H
+--- /dev/null	2026-10-01 20:26:30.510497113 +0000
++++ b/main/boards/chan/robot_gestures.h	2026-10-02 08:53:15.800578767 +0000
+@@ -0,0 +1,149 @@
++#ifndef ROBOT_GESTURES_H
++#define ROBOT_GESTURES_H
++
++#include "device_state.h"
++#include "motor_arbiter.h"
++
++#include <atomic>
++#include <initializer_list>
++
++#include <esp_random.h>
++#include <freertos/FreeRTOS.h>
++#include <freertos/task.h>
++
++// Small "body language" so the robot does not look stiff. In-place wiggles only
++// (turn left/right by the same amount, so it ends where it started and never drives
++// off a table). All motor access goes through MotorArbiter, so a voice move command
++// always wins and nothing can fight over the motors.
++//
++//   - woken up (Connecting): one quick wake-up shake
++//   - question heard / answer starts (Speaking): a small "got it" nod, then every few
++//     seconds a random wiggle, or standing still (random)
++//   - Listening: stays still on purpose, motor noise would disturb the microphone
++class RobotGestures {
++public:
++    // ---------------- Tuning ----------------
++    static constexpr int kWakeSpeed = 50;            // 0..100 (also capped by MotorArbiter)
++    static constexpr int kSpeakSpeed = 40;
++    static constexpr int kAckChancePercent = 70;     // "got it" nod when the answer starts
++    static constexpr int kSpeakChancePercent = 60;   // chance to move at each turn; else stand still
++    static constexpr int kSpeakMinIntervalMs = 2500;
++    static constexpr int kSpeakMaxIntervalMs = 6500;
++    // ----------------------------------------
++
++    explicit RobotGestures(MotorArbiter* arbiter) : arbiter_(arbiter) {
++        xTaskCreate(&RobotGestures::TaskEntry, "gestures", 3072, this, 3, &task_);
++    }
++
++    // Called on every device state change. Never blocks.
++    void OnStateChanged(DeviceState state) {
++        state_.store(state);
++        generation_.fetch_add(1);
++        if (task_ != nullptr) {
++            xTaskNotifyGive(task_);
++        }
++    }
++
++    // Turn all gestures on/off at runtime. Stops anything in progress.
++    void SetEnabled(bool enabled) {
++        enabled_.store(enabled);
++        generation_.fetch_add(1);
++        if (task_ != nullptr) {
++            xTaskNotifyGive(task_);
++        }
++    }
++
++private:
++    struct Step {
++        int dir;    // -1 = turn left, +1 = turn right
++        int speed;  // 0..100
++        int ms;
++    };
++
++    MotorArbiter* arbiter_;
++    TaskHandle_t task_ = nullptr;
++    std::atomic<DeviceState> state_{kDeviceStateUnknown};
++    std::atomic<uint32_t> generation_{0};  // bumped on every change; running gestures abort
++    std::atomic<bool> enabled_{true};
++
++    static void TaskEntry(void* arg) { static_cast<RobotGestures*>(arg)->Run(); }
++
++    bool Cancelled(uint32_t gen) const { return generation_.load() != gen; }
++
++    void Run() {
++        for (;;) {
++            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
++            const uint32_t gen = generation_.load();
++            if (!enabled_.load()) {
++                continue;
++            }
++            switch (state_.load()) {
++                case kDeviceStateConnecting:
++                    PlaySteps(gen, {{-1, kWakeSpeed, 140}, {+1, kWakeSpeed, 280}, {-1, kWakeSpeed, 140}});
++                    break;
++                case kDeviceStateSpeaking:
++                    SpeakLoop(gen);
++                    break;
++                default:
++                    break;
++            }
++        }
++    }
++
++    // Plays the steps one by one; returns false if refused or aborted.
++    bool PlaySteps(uint32_t gen, std::initializer_list<Step> steps) {
++        auto should_abort = [this, gen]() { return Cancelled(gen); };
++        for (const auto& s : steps) {
++            if (Cancelled(gen) || !arbiter_->GestureTurn(s.dir, s.speed, s.ms, should_abort)) {
++                return false;
++            }
++            vTaskDelay(pdMS_TO_TICKS(40));  // let the motors settle before reversing
++        }
++        return true;
++    }
++
++    // Waits wait_ms in small slices. Returns false if cancelled meanwhile.
++    bool Wait(uint32_t gen, uint32_t wait_ms) {
++        for (uint32_t t = 0; t < wait_ms; t += 100) {
++            if (Cancelled(gen)) {
++                return false;
++            }
++            vTaskDelay(pdMS_TO_TICKS(100));
++        }
++        return !Cancelled(gen);
++    }
++
++    void SpeakLoop(uint32_t gen) {
++        // "Got it" nod just as the answer starts (after a beat, so the audio is already playing)
++        if (!Wait(gen, 300)) {
++            return;
++        }
++        if (static_cast<int>(esp_random() % 100) < kAckChancePercent) {
++            PlaySteps(gen, {{+1, kSpeakSpeed, 100}, {-1, kSpeakSpeed, 100}});
++        }
++
++        while (!Cancelled(gen)) {
++            const uint32_t wait_ms =
++                kSpeakMinIntervalMs + esp_random() % (kSpeakMaxIntervalMs - kSpeakMinIntervalMs + 1);
++            if (!Wait(gen, wait_ms)) {
++                return;
++            }
++            if (static_cast<int>(esp_random() % 100) >= kSpeakChancePercent) {
++                continue;  // stand still this time
++            }
++            switch (esp_random() % 3) {
++                case 0:  // small shake
++                    PlaySteps(gen, {{-1, kSpeakSpeed, 110}, {+1, kSpeakSpeed, 220}, {-1, kSpeakSpeed, 110}});
++                    break;
++                case 1:  // quick look to one side and back
++                    PlaySteps(gen, {{+1, kSpeakSpeed, 100}, {-1, kSpeakSpeed, 100}});
++                    break;
++                default:  // slow sway
++                    PlaySteps(gen, {{-1, kSpeakSpeed - 5, 180}, {+1, kSpeakSpeed - 5, 360}, {-1, kSpeakSpeed - 5, 180}});
++                    break;
++            }
++        }
++    }
++};
++
++#endif  // ROBOT_GESTURES_H

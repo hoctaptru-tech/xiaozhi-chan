@@ -1,0 +1,35 @@
+--- a/main/boards/chan/robot-ai.cc	2026-10-02 08:57:21.706173406 +0000
++++ b/main/boards/chan/robot-ai.cc	2026-10-02 08:57:21.748525314 +0000
+@@ -61,6 +61,7 @@
+     MotorArbiter* motor_arbiter_ = nullptr;  // the only thing allowed to drive the motors
+     RobotLed* led_ = nullptr;
+     RobotGestures* gestures_ = nullptr;
++    DeviceState prev_state_ = kDeviceStateUnknown;  // only touched from the main loop
+     
+ 
+     void InitializePowerManager() {
+@@ -217,7 +218,23 @@
+         });
+         gestures_ = new RobotGestures(motor_arbiter_);
+         led_ = new RobotLed(BUILTIN_LED_GPIO);
+-        led_->SetStateCallback([this](DeviceState state) { gestures_->OnStateChanged(state); });
++        led_->SetStateCallback([this](DeviceState state) {
++            gestures_->OnStateChanged(state);
++
++            // Beep when a conversation starts from standby (wake word or button).
++            // By default the wake-word path is silent (SEND_WAKE_WORD_DATA waits for a server
++            // greeting). The listening handler resets the audio decoder after this callback,
++            // which would swallow a sound queued right now, so play it a moment later from
++            // the main loop. Change the sound by editing Lang::Sounds::OGG_POPUP below
++            // (others: OGG_SUCCESS, OGG_EXCLAMATION, OGG_VIBRATION).
++            if (state == kDeviceStateListening &&
++                (prev_state_ == kDeviceStateIdle || prev_state_ == kDeviceStateConnecting)) {
++                Application::GetInstance().Schedule([]() {
++                    Application::GetInstance().PlaySound(Lang::Sounds::OGG_POPUP);
++                });
++            }
++            prev_state_ = state;
++        });
+     }
+ 
+     void InitializeTools() {

@@ -11,15 +11,40 @@
 #include "power_manager.h"
 #include "mcp_server.h"
 #include "motor_controller.h"
+#include "motor_arbiter.h"
+#include "robot_gestures.h"
 
 #include <driver/rtc_io.h>
 #include <esp_sleep.h>
+#include <esp_timer.h>
+#include <functional>
 #include <esp_log.h>
 #include <driver/i2c_master.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_panel_vendor.h>
 
 #define TAG "CHAN_ROBOT_WIFI"
+
+// Same LED as before, plus a hook so the board learns about every device state change
+// (the application calls Led::OnStateChanged() from its main loop on each change).
+class RobotLed : public SingleLed {
+public:
+    using SingleLed::SingleLed;
+
+    void SetStateCallback(std::function<void(DeviceState)> callback) {
+        state_callback_ = std::move(callback);
+    }
+
+    void OnStateChanged() override {
+        SingleLed::OnStateChanged();
+        if (state_callback_) {
+            state_callback_(Application::GetInstance().GetDeviceState());
+        }
+    }
+
+private:
+    std::function<void(DeviceState)> state_callback_;
+};
 
 class CHAN_ROBOT_WIFI : public WifiBoard {
 private:
@@ -33,6 +58,10 @@ private:
     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
     esp_lcd_panel_handle_t panel_ = nullptr;
     MotorController* motor_controller_ = nullptr;
+    MotorArbiter* motor_arbiter_ = nullptr;  // the only thing allowed to drive the motors
+    RobotLed* led_ = nullptr;
+    RobotGestures* gestures_ = nullptr;
+    DeviceState prev_state_ = kDeviceStateUnknown;  // only touched from the main loop
     
 
     void InitializePowerManager() {
@@ -183,8 +212,49 @@ private:
             /*invert_left=*/false, /*invert_right=*/false);
     }
 
+    void InitializeGestures() {
+        motor_arbiter_ = new MotorArbiter(motor_controller_, [this]() {
+            return power_manager_ != nullptr && power_manager_->IsCharging();  // docked: no gestures
+        });
+        gestures_ = new RobotGestures(motor_arbiter_);
+        led_ = new RobotLed(BUILTIN_LED_GPIO);
+        led_->SetStateCallback([this](DeviceState state) {
+            gestures_->OnStateChanged(state);
+
+            // Beep when a conversation starts from standby (wake word or button).
+            // By default the wake-word path is silent (SEND_WAKE_WORD_DATA waits for a server
+            // greeting). The listening handler resets the audio decoder after this callback,
+            // which would swallow a sound queued right now, so play it a moment later from
+            // the main loop. Change the sound by editing Lang::Sounds::OGG_POPUP below
+            // (others: OGG_SUCCESS, OGG_EXCLAMATION, OGG_VIBRATION).
+            if (state == kDeviceStateListening &&
+                (prev_state_ == kDeviceStateIdle || prev_state_ == kDeviceStateConnecting)) {
+                Application::GetInstance().Schedule([]() {
+                    Application::GetInstance().PlaySound(Lang::Sounds::OGG_POPUP);
+                });
+                gestures_->OnWake();  // the shake starts right after the beep
+            }
+            prev_state_ = state;
+        });
+    }
+
     void InitializeTools() {
         auto& mcp_server = McpServer::GetInstance();
+
+        mcp_server.AddTool(
+            "self.robot.set_gestures",
+            "Bat hoac tat cu dong nho cua robot (lac nho khi duoc goi day va luc dang tra loi). "
+            "enabled=false khi nguoi dung muon robot dung yen; enabled=true de bat lai.",
+            PropertyList({
+                Property("enabled", kPropertyTypeBoolean),
+            }),
+            [this](const PropertyList& properties) -> ReturnValue {
+                if (gestures_ == nullptr) {
+                    return false;
+                }
+                gestures_->SetEnabled(properties["enabled"].value<bool>());
+                return true;
+            });
 
         mcp_server.AddTool(
             "self.robot.move",
@@ -207,23 +277,25 @@ private:
                 int speed = properties["speed"].value<int>();
                 bool continuous = properties["continuous"].value<bool>();
 
-                if (!motor_controller_) {
+                if (!motor_arbiter_) {
                     return false;
                 }
 
                 int straight_duration_ms = continuous ? 0 : 800;
-                int turn_duration_ms = continuous ? 0 : 500;
+                int turn_duration_ms = continuous ? 0 : 600;
 
+                // All motor access goes through the arbiter (voice commands always win)
+                using Action = MotorArbiter::Action;
                 if (action == "forward") {
-                    motor_controller_->Forward(speed, straight_duration_ms);
+                    motor_arbiter_->VoiceDrive(Action::kForward, speed, straight_duration_ms);
                 } else if (action == "backward") {
-                    motor_controller_->Backward(speed, straight_duration_ms);
+                    motor_arbiter_->VoiceDrive(Action::kBackward, speed, straight_duration_ms);
                 } else if (action == "turn_left") {
-                    motor_controller_->TurnLeft(speed, turn_duration_ms);
+                    motor_arbiter_->VoiceDrive(Action::kTurnLeft, speed, turn_duration_ms);
                 } else if (action == "turn_right") {
-                    motor_controller_->TurnRight(speed, turn_duration_ms);
+                    motor_arbiter_->VoiceDrive(Action::kTurnRight, speed, turn_duration_ms);
                 } else if (action == "stop") {
-                    motor_controller_->Stop();
+                    motor_arbiter_->VoiceStop();
                 } else {
                     return false;
                 }
@@ -242,12 +314,12 @@ public:
         InitializeSsd1306Display();
         InitializeButtons();
         InitializeMotor();
+        InitializeGestures();
         InitializeTools();
     }
 
     virtual Led* GetLed() override {
-        static SingleLed led(BUILTIN_LED_GPIO);
-        return &led;
+        return led_;
     }
 
     virtual AudioCodec* GetAudioCodec() override {

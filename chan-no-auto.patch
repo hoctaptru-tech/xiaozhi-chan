@@ -1,0 +1,23 @@
+--- a/main/boards/chan/robot_gestures.h	2026-10-02 10:15:19.453959783 +0000
++++ b/main/boards/chan/robot_gestures.h	2026-10-02 10:15:19.490147653 +0000
+@@ -23,6 +23,9 @@
+ class RobotGestures {
+ public:
+     // ---------------- Tuning ----------------
++    // Automatic movements while the robot is answering (the "got it" nod and the random
++    // wiggles). Off by default: only the wake-up shake remains. Set to true to bring them back.
++    static constexpr bool kSpeakGestures = false;
+     static constexpr int kWakeSpeed = 90;            // 0..100 (also capped by MotorArbiter::kMaxGestureSpeed)
+     static constexpr int kSpeakSpeed = 60;
+     static constexpr int kAckChancePercent = 70;     // "got it" nod when the answer starts
+@@ -96,7 +99,9 @@
+                     wake_in_progress_.store(false);
+                     break;
+                 case kDeviceStateSpeaking:
+-                    SpeakLoop(gen);
++                    if (kSpeakGestures) {
++                        SpeakLoop(gen);
++                    }
+                     break;
+                 default:
+                     break;

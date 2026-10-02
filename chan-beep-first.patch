@@ -1,0 +1,98 @@
+--- a/main/boards/chan/robot-ai.cc	2026-10-02 10:21:15.902382152 +0000
++++ b/main/boards/chan/robot-ai.cc	2026-10-02 10:21:15.950500943 +0000
+@@ -219,11 +219,7 @@
+         gestures_ = new RobotGestures(motor_arbiter_);
+         led_ = new RobotLed(BUILTIN_LED_GPIO);
+         led_->SetStateCallback([this](DeviceState state) {
+-            // Waking straight into listening (the connecting state was skipped) still
+-            // counts as "just woken up", so the wake-up shake plays in that case too.
+-            const bool woke_into_listening =
+-                (state == kDeviceStateListening && prev_state_ == kDeviceStateIdle);
+-            gestures_->OnStateChanged(woke_into_listening ? kDeviceStateConnecting : state);
++            gestures_->OnStateChanged(state);
+ 
+             // Beep when a conversation starts from standby (wake word or button).
+             // By default the wake-word path is silent (SEND_WAKE_WORD_DATA waits for a server
+@@ -236,6 +232,7 @@
+                 Application::GetInstance().Schedule([]() {
+                     Application::GetInstance().PlaySound(Lang::Sounds::OGG_POPUP);
+                 });
++                gestures_->OnWake();  // the shake starts right after the beep
+             }
+             prev_state_ = state;
+         });
+--- a/main/boards/chan/robot_gestures.h	2026-10-02 10:21:15.902764848 +0000
++++ b/main/boards/chan/robot_gestures.h	2026-10-02 10:21:15.950145366 +0000
+@@ -16,7 +16,7 @@
+ // off a table). All motor access goes through MotorArbiter, so a voice move command
+ // always wins and nothing can fight over the motors.
+ //
+-//   - woken up (Connecting): one quick wake-up shake
++//   - woken up: the beep plays first, then one quick wake-up shake (see OnWake)
+ //   - question heard / answer starts (Speaking): a small "got it" nod, then every few
+ //     seconds a random wiggle, or standing still (random)
+ //   - Listening: stays still on purpose, motor noise would disturb the microphone
+@@ -26,6 +26,7 @@
+     // Automatic movements while the robot is answering (the "got it" nod and the random
+     // wiggles). Off by default: only the wake-up shake remains. Set to true to bring them back.
+     static constexpr bool kSpeakGestures = false;
++    static constexpr int kWakeDelayMs = 600;         // the beep (~0.5 s) plays first, then the shake
+     static constexpr int kWakeSpeed = 90;            // 0..100 (also capped by MotorArbiter::kMaxGestureSpeed)
+     static constexpr int kSpeakSpeed = 60;
+     static constexpr int kAckChancePercent = 70;     // "got it" nod when the answer starts
+@@ -51,7 +52,7 @@
+         if (state == kDeviceStateListening && wake_in_progress_.load()) {
+             return;
+         }
+-        wake_in_progress_.store(state == kDeviceStateConnecting);
++        wake_in_progress_.store(false);
+         state_.store(state);
+         generation_.fetch_add(1);
+         if (task_ != nullptr) {
+@@ -59,6 +60,17 @@
+         }
+     }
+ 
++    // Called when a conversation starts (same moment as the wake beep). The shake starts
++    // kWakeDelayMs later, so the beep always comes first.
++    void OnWake() {
++        generation_.fetch_add(1);  // before the flags, so the task reads the new value
++        wake_in_progress_.store(true);
++        wake_pending_.store(true);
++        if (task_ != nullptr) {
++            xTaskNotifyGive(task_);
++        }
++    }
++
+     // Turn all gestures on/off at runtime. Stops anything in progress.
+     void SetEnabled(bool enabled) {
+         enabled_.store(enabled);
+@@ -81,6 +93,7 @@
+     std::atomic<uint32_t> generation_{0};  // bumped on every change; running gestures abort
+     std::atomic<bool> enabled_{true};
+     std::atomic<bool> wake_in_progress_{false};
++    std::atomic<bool> wake_pending_{false};
+ 
+     static void TaskEntry(void* arg) { static_cast<RobotGestures*>(arg)->Run(); }
+ 
+@@ -93,11 +106,16 @@
+             if (!enabled_.load()) {
+                 continue;
+             }
++            if (wake_pending_.exchange(false)) {
++                const uint32_t wake_gen = generation_.load();
++                // Beep first, then shake
++                if (Wait(wake_gen, kWakeDelayMs)) {
++                    PlaySteps(wake_gen, {{-1, kWakeSpeed, 180}, {+1, kWakeSpeed, 480}, {-1, kWakeSpeed, 300}});
++                }
++                wake_in_progress_.store(false);
++                continue;
++            }
+             switch (state_.load()) {
+-                case kDeviceStateConnecting:
+-                    PlaySteps(gen, {{-1, kWakeSpeed, 180}, {+1, kWakeSpeed, 480}, {-1, kWakeSpeed, 300}});
+-                    wake_in_progress_.store(false);
+-                    break;
+                 case kDeviceStateSpeaking:
+                     if (kSpeakGestures) {
+                         SpeakLoop(gen);

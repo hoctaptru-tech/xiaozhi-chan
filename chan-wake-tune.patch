@@ -1,0 +1,85 @@
+--- a/main/boards/chan/motor_arbiter.h	2026-10-02 09:50:58.878026462 +0000
++++ b/main/boards/chan/motor_arbiter.h	2026-10-02 09:50:58.928322234 +0000
+@@ -33,6 +33,7 @@
+     static constexpr int kMaxContinuousMs = 30000;         // safety limit for "continuous"
+     static constexpr int kRampMs = 80;                     // soft start time
+     static constexpr int kReverseDeadMs = 80;              // pause before changing direction
++    static constexpr int kGestureRampMs = 40;              // gestures start faster so they look lively
+     static constexpr int64_t kVoiceQuietUs = 6LL * 1000 * 1000;  // gestures wait this long after a voice move
+     // ----------------------------------------
+ 
+@@ -78,7 +79,7 @@
+             }
+             my_epoch = epoch_.load();
+             speed = std::clamp(speed, 0, kMaxSpeed);
+-            DriveLocked(dir < 0 ? -speed : speed, dir < 0 ? speed : -speed, ms);
++            DriveLocked(dir < 0 ? -speed : speed, dir < 0 ? speed : -speed, ms, kGestureRampMs);
+         }
+ 
+         const int64_t end_us = esp_timer_get_time() + static_cast<int64_t>(ms) * 1000;
+@@ -121,7 +122,7 @@
+     }
+ 
+     // Caller holds mutex_.
+-    void DriveLocked(int left, int right, int duration_ms) {
++    void DriveLocked(int left, int right, int duration_ms, int ramp_ms = kRampMs) {
+         const int64_t now = esp_timer_get_time();
+         const bool reversing = (left * last_left_ < 0 || right * last_right_ < 0) &&
+                                now < last_drive_end_us_ + 300000;
+@@ -133,11 +134,11 @@
+         const int run_ms = duration_ms > 0 ? duration_ms : kMaxContinuousMs;
+         // The watchdog is armed first and also covers the soft start, so a stuck caller
+         // can never leave the motors running.
+-        motor_->Drive(left * 40 / 100, right * 40 / 100, run_ms + kRampMs);
+-        vTaskDelay(pdMS_TO_TICKS(kRampMs / 2));
++        motor_->Drive(left * 40 / 100, right * 40 / 100, run_ms + ramp_ms);
++        vTaskDelay(pdMS_TO_TICKS(ramp_ms / 2));
+         motor_->SetLeft(left * 70 / 100);
+         motor_->SetRight(right * 70 / 100);
+-        vTaskDelay(pdMS_TO_TICKS(kRampMs / 2));
++        vTaskDelay(pdMS_TO_TICKS(ramp_ms / 2));
+         motor_->SetLeft(left);
+         motor_->SetRight(right);
+ 
+--- a/main/boards/chan/robot_gestures.h	2026-10-02 09:50:58.878183022 +0000
++++ b/main/boards/chan/robot_gestures.h	2026-10-02 09:50:58.928782730 +0000
+@@ -23,12 +23,18 @@
+ class RobotGestures {
+ public:
+     // ---------------- Tuning ----------------
+-    static constexpr int kWakeSpeed = 60;            // 0..100 (also capped by MotorArbiter)
+-    static constexpr int kSpeakSpeed = 50;
++    static constexpr int kWakeSpeed = 70;            // 0..100 (also capped by MotorArbiter::kMaxSpeed)
++    static constexpr int kSpeakSpeed = 60;
+     static constexpr int kAckChancePercent = 70;     // "got it" nod when the answer starts
+     static constexpr int kSpeakChancePercent = 60;   // chance to move at each turn; else stand still
+     static constexpr int kSpeakMinIntervalMs = 2500;
+     static constexpr int kSpeakMaxIntervalMs = 6500;
++    // Left/right motors are never identical (friction, wiring, battery sag), so one
++    // direction often turns less than the other for the same time. Scale the duration of
++    // every left/right step here: if the robot turns too little to the right, raise
++    // kRightTurnPercent (e.g. 130); if too much to the left, lower kLeftTurnPercent.
++    static constexpr int kLeftTurnPercent = 100;
++    static constexpr int kRightTurnPercent = 100;
+     // ----------------------------------------
+ 
+     explicit RobotGestures(MotorArbiter* arbiter) : arbiter_(arbiter) {
+@@ -86,7 +92,7 @@
+             }
+             switch (state_.load()) {
+                 case kDeviceStateConnecting:
+-                    PlaySteps(gen, {{-1, kWakeSpeed, 220}, {+1, kWakeSpeed, 440}, {-1, kWakeSpeed, 220}});
++                    PlaySteps(gen, {{-1, kWakeSpeed, 180}, {+1, kWakeSpeed, 480}, {-1, kWakeSpeed, 300}});
+                     wake_in_progress_.store(false);
+                     break;
+                 case kDeviceStateSpeaking:
+@@ -102,7 +108,8 @@
+     bool PlaySteps(uint32_t gen, std::initializer_list<Step> steps) {
+         auto should_abort = [this, gen]() { return Cancelled(gen); };
+         for (const auto& s : steps) {
+-            if (Cancelled(gen) || !arbiter_->GestureTurn(s.dir, s.speed, s.ms, should_abort)) {
++            const int ms = s.ms * (s.dir < 0 ? kLeftTurnPercent : kRightTurnPercent) / 100;
++            if (Cancelled(gen) || !arbiter_->GestureTurn(s.dir, s.speed, ms, should_abort)) {
+                 return false;
+             }
+             vTaskDelay(pdMS_TO_TICKS(40));  // let the motors settle before reversing

@@ -1,0 +1,32 @@
+--- a/main/boards/chan/motor_arbiter.h	2026-10-02 09:56:31.828550266 +0000
++++ b/main/boards/chan/motor_arbiter.h	2026-10-02 09:56:31.872368936 +0000
+@@ -29,7 +29,8 @@
+ class MotorArbiter {
+ public:
+     // ---------------- Tuning ----------------
+-    static constexpr int kMaxSpeed = 70;                   // hard cap for every command (0..100)
++    static constexpr int kMaxSpeed = 70;                   // hard cap for voice commands (0..100)
++    static constexpr int kMaxGestureSpeed = 90;            // hard cap for gestures (short, in place)
+     static constexpr int kMaxContinuousMs = 30000;         // safety limit for "continuous"
+     static constexpr int kRampMs = 80;                     // soft start time
+     static constexpr int kReverseDeadMs = 80;              // pause before changing direction
+@@ -78,7 +79,7 @@
+                 return false;
+             }
+             my_epoch = epoch_.load();
+-            speed = std::clamp(speed, 0, kMaxSpeed);
++            speed = std::clamp(speed, 0, kMaxGestureSpeed);
+             DriveLocked(dir < 0 ? -speed : speed, dir < 0 ? speed : -speed, ms, kGestureRampMs);
+         }
+ 
+--- a/main/boards/chan/robot_gestures.h	2026-10-02 09:56:31.828677007 +0000
++++ b/main/boards/chan/robot_gestures.h	2026-10-02 09:56:31.872913345 +0000
+@@ -23,7 +23,7 @@
+ class RobotGestures {
+ public:
+     // ---------------- Tuning ----------------
+-    static constexpr int kWakeSpeed = 70;            // 0..100 (also capped by MotorArbiter::kMaxSpeed)
++    static constexpr int kWakeSpeed = 90;            // 0..100 (also capped by MotorArbiter::kMaxGestureSpeed)
+     static constexpr int kSpeakSpeed = 60;
+     static constexpr int kAckChancePercent = 70;     // "got it" nod when the answer starts
+     static constexpr int kSpeakChancePercent = 60;   // chance to move at each turn; else stand still

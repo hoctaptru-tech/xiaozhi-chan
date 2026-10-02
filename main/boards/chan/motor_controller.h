@@ -60,28 +60,36 @@ public:
 
     // duration_ms = 0 -> chay lien tuc, khong tu dong dung (huy watchdog neu dang co)
     // duration_ms > 0 -> chay xong tu dong Stop() sau duration_ms
-    void Forward(int speed = 60, int duration_ms = 800) {
+    void Forward(int speed = 100, int duration_ms = 800) {
         SetLeft(speed);
         SetRight(speed);
         ArmAutoStop(duration_ms);
     }
 
-    void Backward(int speed = 60, int duration_ms = 800) {
+    void Backward(int speed = 100, int duration_ms = 800) {
         SetLeft(-speed);
         SetRight(-speed);
         ArmAutoStop(duration_ms);
     }
 
-    void TurnLeft(int speed = 60, int duration_ms = 500) {
+    void TurnLeft(int speed = 100, int duration_ms = 600) {
         SetLeft(-speed);
         SetRight(speed);
         ArmAutoStop(duration_ms);
     }
 
-    void TurnRight(int speed = 60, int duration_ms = 500) {
+    void TurnRight(int speed = 100, int duration_ms = 600) {
         SetLeft(speed);
         SetRight(-speed);
         ArmAutoStop(duration_ms);
+    }
+
+    // Drive both sides independently (-100..100 each) with the auto-stop watchdog.
+    // duration_ms = 0 -> no watchdog (caller must Stop()).
+    void Drive(int left, int right, int duration_ms) {
+        ArmAutoStop(duration_ms);
+        SetLeft(left);
+        SetRight(right);
     }
 
     void Stop() {

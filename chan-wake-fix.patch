@@ -1,0 +1,85 @@
+--- a/main/boards/chan/robot-ai.cc	2026-10-02 09:24:19.342773160 +0000
++++ b/main/boards/chan/robot-ai.cc	2026-10-02 09:24:19.383960008 +0000
+@@ -219,7 +219,11 @@
+         gestures_ = new RobotGestures(motor_arbiter_);
+         led_ = new RobotLed(BUILTIN_LED_GPIO);
+         led_->SetStateCallback([this](DeviceState state) {
+-            gestures_->OnStateChanged(state);
++            // Waking straight into listening (the connecting state was skipped) still
++            // counts as "just woken up", so the wake-up shake plays in that case too.
++            const bool woke_into_listening =
++                (state == kDeviceStateListening && prev_state_ == kDeviceStateIdle);
++            gestures_->OnStateChanged(woke_into_listening ? kDeviceStateConnecting : state);
+ 
+             // Beep when a conversation starts from standby (wake word or button).
+             // By default the wake-word path is silent (SEND_WAKE_WORD_DATA waits for a server
+--- a/main/boards/chan/robot_gestures.h	2026-10-02 09:24:19.343103889 +0000
++++ b/main/boards/chan/robot_gestures.h	2026-10-02 09:24:19.383555288 +0000
+@@ -23,8 +23,8 @@
+ class RobotGestures {
+ public:
+     // ---------------- Tuning ----------------
+-    static constexpr int kWakeSpeed = 50;            // 0..100 (also capped by MotorArbiter)
+-    static constexpr int kSpeakSpeed = 40;
++    static constexpr int kWakeSpeed = 60;            // 0..100 (also capped by MotorArbiter)
++    static constexpr int kSpeakSpeed = 50;
+     static constexpr int kAckChancePercent = 70;     // "got it" nod when the answer starts
+     static constexpr int kSpeakChancePercent = 60;   // chance to move at each turn; else stand still
+     static constexpr int kSpeakMinIntervalMs = 2500;
+@@ -37,6 +37,12 @@
+ 
+     // Called on every device state change. Never blocks.
+     void OnStateChanged(DeviceState state) {
++        // The wake-up shake must not be cut short when the robot goes straight on to
++        // listening (that was the "twitch and stop"). Any other state still cancels it.
++        if (state == kDeviceStateListening && wake_in_progress_.load()) {
++            return;
++        }
++        wake_in_progress_.store(state == kDeviceStateConnecting);
+         state_.store(state);
+         generation_.fetch_add(1);
+         if (task_ != nullptr) {
+@@ -65,6 +71,7 @@
+     std::atomic<DeviceState> state_{kDeviceStateUnknown};
+     std::atomic<uint32_t> generation_{0};  // bumped on every change; running gestures abort
+     std::atomic<bool> enabled_{true};
++    std::atomic<bool> wake_in_progress_{false};
+ 
+     static void TaskEntry(void* arg) { static_cast<RobotGestures*>(arg)->Run(); }
+ 
+@@ -79,7 +86,8 @@
+             }
+             switch (state_.load()) {
+                 case kDeviceStateConnecting:
+-                    PlaySteps(gen, {{-1, kWakeSpeed, 140}, {+1, kWakeSpeed, 280}, {-1, kWakeSpeed, 140}});
++                    PlaySteps(gen, {{-1, kWakeSpeed, 220}, {+1, kWakeSpeed, 440}, {-1, kWakeSpeed, 220}});
++                    wake_in_progress_.store(false);
+                     break;
+                 case kDeviceStateSpeaking:
+                     SpeakLoop(gen);
+@@ -119,7 +127,7 @@
+             return;
+         }
+         if (static_cast<int>(esp_random() % 100) < kAckChancePercent) {
+-            PlaySteps(gen, {{+1, kSpeakSpeed, 100}, {-1, kSpeakSpeed, 100}});
++            PlaySteps(gen, {{+1, kSpeakSpeed, 140}, {-1, kSpeakSpeed, 140}});
+         }
+ 
+         while (!Cancelled(gen)) {
+@@ -133,13 +141,13 @@
+             }
+             switch (esp_random() % 3) {
+                 case 0:  // small shake
+-                    PlaySteps(gen, {{-1, kSpeakSpeed, 110}, {+1, kSpeakSpeed, 220}, {-1, kSpeakSpeed, 110}});
++                    PlaySteps(gen, {{-1, kSpeakSpeed, 160}, {+1, kSpeakSpeed, 320}, {-1, kSpeakSpeed, 160}});
+                     break;
+                 case 1:  // quick look to one side and back
+-                    PlaySteps(gen, {{+1, kSpeakSpeed, 100}, {-1, kSpeakSpeed, 100}});
++                    PlaySteps(gen, {{+1, kSpeakSpeed, 140}, {-1, kSpeakSpeed, 140}});
+                     break;
+                 default:  // slow sway
+-                    PlaySteps(gen, {{-1, kSpeakSpeed - 5, 180}, {+1, kSpeakSpeed - 5, 360}, {-1, kSpeakSpeed - 5, 180}});
++                    PlaySteps(gen, {{-1, kSpeakSpeed - 5, 260}, {+1, kSpeakSpeed - 5, 520}, {-1, kSpeakSpeed - 5, 260}});
+                     break;
+             }
+         }
