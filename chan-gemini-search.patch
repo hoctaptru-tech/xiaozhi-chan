@@ -1,0 +1,245 @@
+--- a/main/Kconfig.projbuild	2026-10-03 01:08:36.606036876 +0000
++++ b/main/Kconfig.projbuild	2026-10-03 01:08:36.640830208 +0000
+@@ -6,6 +6,21 @@
+     help
+         The application will access this URL to check for new firmwares and server address.
+ 
++config GEMINI_API_KEY
++    string "Gemini API key (web search tool)"
++    default ""
++    help
++        API key for the self.search.web tool (Gemini with Google Search).
++        Create one in Google AI Studio. It is stored in sdkconfig (git-ignored) and
++        compiled into the firmware, so do not share the built .bin file.
++        Leave empty to disable web search.
++
++config GEMINI_MODEL
++    string "Gemini model for web search"
++    default "gemini-3.6-flash"
++    help
++        Model name used by the web search tool, for example gemini-3.6-flash.
++
+ choice
+     prompt "Flash Assets"
+     default FLASH_DEFAULT_ASSETS if !USE_EMOTE_MESSAGE_STYLE
+--- a/main/boards/chan/robot-ai.cc	2026-10-03 01:08:36.608095440 +0000
++++ b/main/boards/chan/robot-ai.cc	2026-10-03 01:08:36.643242851 +0000
+@@ -13,6 +13,7 @@
+ #include "motor_controller.h"
+ #include "motor_arbiter.h"
+ #include "robot_gestures.h"
++#include "gemini_search.h"
+ 
+ #include <driver/rtc_io.h>
+ #include <esp_sleep.h>
+@@ -242,6 +243,18 @@
+         auto& mcp_server = McpServer::GetInstance();
+ 
+         mcp_server.AddTool(
++            "self.search.web",
++            "Search the Internet (Google Search through Gemini) for current information: news, "
++            "weather, prices, sports results, recent events, or anything you are not sure about. "
++            "Takes a few seconds. Returns a short answer; tell it to the user in your own words.",
++            PropertyList({
++                Property("query", kPropertyTypeString),
++            }),
++            [](const PropertyList& properties) -> ReturnValue {
++                return GeminiSearch::Search(properties["query"].value<std::string>());
++            });
++
++        mcp_server.AddTool(
+             "self.robot.set_gestures",
+             "Bat hoac tat cu dong nho cua robot (lac nho khi duoc goi day va luc dang tra loi). "
+             "enabled=false khi nguoi dung muon robot dung yen; enabled=true de bat lai.",
+--- /dev/null	2026-10-02 21:27:52.282457864 +0000
++++ b/main/boards/chan/gemini_search.h	2026-10-03 01:08:36.609544478 +0000
+@@ -0,0 +1,189 @@
++#ifndef GEMINI_SEARCH_H
++#define GEMINI_SEARCH_H
++
++#include "board.h"
++#include "sdkconfig.h"
++
++#include <cJSON.h>
++#include <esp_log.h>
++
++#include <memory>
++#include <string>
++
++// Web search through the Gemini API with Google Search grounding.
++// The API key and the model name come from menuconfig (Xiaozhi Assistant > Gemini ...),
++// so the key lives in sdkconfig (git-ignored) and never in the source.
++//
++// Search() blocks for a few seconds (network + search + answer) and always returns a
++// short plain-text string: the answer, or a one-line error the AI can tell the user.
++class GeminiSearch {
++public:
++    // ---------------- Tuning ----------------
++    static constexpr int kTimeoutMs = 15000;
++    static constexpr size_t kMaxAnswerBytes = 700;      // keep it short enough to be spoken
++    static constexpr const char* kThinkingLevel = "low";  // minimal / low / medium / high (lower = faster)
++    // ----------------------------------------
++
++    static std::string Search(const std::string& query) {
++        const std::string api_key = CONFIG_GEMINI_API_KEY;
++        if (api_key.empty()) {
++            return "Web search is not set up: no Gemini API key in the firmware "
++                   "(menuconfig > Xiaozhi Assistant > Gemini API key).";
++        }
++        if (query.empty()) {
++            return "Empty search query.";
++        }
++
++        const std::string url = std::string("https://generativelanguage.googleapis.com/v1beta/models/") +
++                                CONFIG_GEMINI_MODEL + ":generateContent";
++
++        auto http = Board::GetInstance().GetNetwork()->CreateHttp(3);
++        http->SetTimeout(kTimeoutMs);
++        http->SetHeader("Content-Type", "application/json");
++        http->SetHeader("x-goog-api-key", api_key);
++        http->SetContent(BuildRequest(query));
++
++        if (auto opened = http->Open("POST", url); !opened) {
++            ESP_LOGE(TAG, "Failed to connect to Gemini: %s", opened.error().ToString().c_str());
++            return "Could not reach Gemini (network error or timeout).";
++        }
++        auto status = http->GetStatusCode();
++        if (!status) {
++            ESP_LOGE(TAG, "Failed to read Gemini status: %s", status.error().ToString().c_str());
++            http->Close();
++            return "Gemini did not answer in time.";
++        }
++        std::string response = http->ReadAll();
++        http->Close();
++
++        if (*status != 200) {
++            ESP_LOGE(TAG, "Gemini returned HTTP %d: %s", *status, ErrorMessage(response).c_str());
++            if (*status == 400 || *status == 401 || *status == 403) {
++                return "Gemini refused the request: the API key is invalid or not allowed to use this model.";
++            }
++            if (*status == 429) {
++                return "Gemini search quota is used up for now, try again later.";
++            }
++            return "Gemini had a server problem (HTTP " + std::to_string(*status) + ").";
++        }
++        return ParseAnswer(response);
++    }
++
++private:
++    static constexpr const char* TAG = "GeminiSearch";
++
++    static constexpr const char* kSystemPrompt =
++        "You are the voice of a small home robot. Use Google Search for current facts. "
++        "Answer in the same language as the question, in at most three short sentences "
++        "that sound natural when spoken aloud. No markdown, no lists, no links.";
++
++    using JsonPtr = std::unique_ptr<cJSON, decltype(&cJSON_Delete)>;
++
++    static std::string BuildRequest(const std::string& query) {
++        JsonPtr root(cJSON_CreateObject(), cJSON_Delete);
++
++        cJSON* system_instruction = cJSON_AddObjectToObject(root.get(), "systemInstruction");
++        cJSON* system_parts = cJSON_AddArrayToObject(system_instruction, "parts");
++        cJSON* system_part = cJSON_CreateObject();
++        cJSON_AddStringToObject(system_part, "text", kSystemPrompt);
++        cJSON_AddItemToArray(system_parts, system_part);
++
++        cJSON* contents = cJSON_AddArrayToObject(root.get(), "contents");
++        cJSON* content = cJSON_CreateObject();
++        cJSON_AddStringToObject(content, "role", "user");
++        cJSON* parts = cJSON_AddArrayToObject(content, "parts");
++        cJSON* part = cJSON_CreateObject();
++        cJSON_AddStringToObject(part, "text", query.c_str());
++        cJSON_AddItemToArray(parts, part);
++        cJSON_AddItemToArray(contents, content);
++
++        cJSON* tools = cJSON_AddArrayToObject(root.get(), "tools");
++        cJSON* tool = cJSON_CreateObject();
++        cJSON_AddItemToObject(tool, "google_search", cJSON_CreateObject());
++        cJSON_AddItemToArray(tools, tool);
++
++        cJSON* generation_config = cJSON_AddObjectToObject(root.get(), "generationConfig");
++        cJSON_AddNumberToObject(generation_config, "maxOutputTokens", 1024);
++        cJSON* thinking = cJSON_AddObjectToObject(generation_config, "thinkingConfig");
++        cJSON_AddStringToObject(thinking, "thinkingLevel", kThinkingLevel);
++
++        char* printed = cJSON_PrintUnformatted(root.get());
++        std::string body = printed != nullptr ? printed : "";
++        cJSON_free(printed);
++        return body;
++    }
++
++    static std::string ErrorMessage(const std::string& response) {
++        JsonPtr root(cJSON_Parse(response.c_str()), cJSON_Delete);
++        if (root) {
++            cJSON* error = cJSON_GetObjectItem(root.get(), "error");
++            cJSON* message = error != nullptr ? cJSON_GetObjectItem(error, "message") : nullptr;
++            if (cJSON_IsString(message) && message->valuestring != nullptr) {
++                return message->valuestring;
++            }
++        }
++        return response.substr(0, 200);
++    }
++
++    static std::string ParseAnswer(const std::string& response) {
++        JsonPtr root(cJSON_Parse(response.c_str()), cJSON_Delete);
++        if (!root) {
++            return "Gemini returned an answer that could not be read.";
++        }
++        cJSON* candidates = cJSON_GetObjectItem(root.get(), "candidates");
++        cJSON* first = cJSON_IsArray(candidates) ? cJSON_GetArrayItem(candidates, 0) : nullptr;
++        if (first == nullptr) {
++            return "Gemini gave no answer (the request may have been blocked).";
++        }
++        cJSON* content = cJSON_GetObjectItem(first, "content");
++        cJSON* parts = content != nullptr ? cJSON_GetObjectItem(content, "parts") : nullptr;
++
++        std::string text;
++        cJSON* part = nullptr;
++        cJSON_ArrayForEach(part, parts) {
++            if (cJSON_IsTrue(cJSON_GetObjectItem(part, "thought"))) {
++                continue;  // skip thought summaries
++            }
++            cJSON* piece = cJSON_GetObjectItem(part, "text");
++            if (cJSON_IsString(piece) && piece->valuestring != nullptr) {
++                text += piece->valuestring;
++            }
++        }
++        text = CleanForSpeech(text);
++        return text.empty() ? "No answer found." : text;
++    }
++
++    // Plain text for the speaker: no markdown marks, one line, bounded length (UTF-8 safe).
++    static std::string CleanForSpeech(const std::string& in) {
++        std::string out;
++        out.reserve(in.size());
++        bool last_space = true;
++        for (char c : in) {
++            if (c == '*' || c == '#' || c == '`' || c == '_') {
++                continue;
++            }
++            if (c == '\n' || c == '\r' || c == '\t' || c == ' ') {
++                if (!last_space) {
++                    out += ' ';
++                }
++                last_space = true;
++                continue;
++            }
++            out += c;
++            last_space = false;
++        }
++        while (!out.empty() && out.back() == ' ') {
++            out.pop_back();
++        }
++        if (out.size() > kMaxAnswerBytes) {
++            size_t cut = kMaxAnswerBytes;
++            while (cut > 0 && (static_cast<unsigned char>(out[cut]) & 0xC0) == 0x80) {
++                --cut;  // do not cut a multi-byte character in half
++            }
++            out.resize(cut);
++        }
++        return out;
++    }
++};
++
++#endif  // GEMINI_SEARCH_H

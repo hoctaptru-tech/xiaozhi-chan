@@ -1,0 +1,70 @@
+--- a/main/boards/chan/gemini_search.h	2026-10-03 01:41:43.907335682 +0000
++++ b/main/boards/chan/gemini_search.h	2026-10-03 01:41:43.936864341 +0000
+@@ -4,6 +4,21 @@
+ #include "board.h"
+ #include "sdkconfig.h"
+ 
++// Easiest setup: put the key in main/boards/chan/gemini_secret.h (git-ignored, see the
++// placeholder file). Menuconfig still works as a fallback; both are optional at build time.
++#if __has_include("gemini_secret.h")
++#include "gemini_secret.h"
++#endif
++#ifndef GEMINI_API_KEY_LOCAL
++#define GEMINI_API_KEY_LOCAL ""
++#endif
++#ifndef CONFIG_GEMINI_API_KEY
++#define CONFIG_GEMINI_API_KEY ""
++#endif
++#ifndef CONFIG_GEMINI_MODEL
++#define CONFIG_GEMINI_MODEL "gemini-3.6-flash"
++#endif
++
+ #include <cJSON.h>
+ #include <esp_log.h>
+ 
+@@ -11,8 +26,8 @@
+ #include <string>
+ 
+ // Web search through the Gemini API with Google Search grounding.
+-// The API key and the model name come from menuconfig (Xiaozhi Assistant > Gemini ...),
+-// so the key lives in sdkconfig (git-ignored) and never in the source.
++// The API key comes from gemini_secret.h (git-ignored) or menuconfig; the model name from
++// menuconfig, defaulting to gemini-3.6-flash.
+ //
+ // Search() blocks for a few seconds (network + search + answer) and always returns a
+ // short plain-text string: the answer, or a one-line error the AI can tell the user.
+@@ -25,10 +40,13 @@
+     // ----------------------------------------
+ 
+     static std::string Search(const std::string& query) {
+-        const std::string api_key = CONFIG_GEMINI_API_KEY;
++        std::string api_key = GEMINI_API_KEY_LOCAL;
++        if (api_key.empty() || api_key == "PASTE_YOUR_GEMINI_API_KEY_HERE") {
++            api_key = CONFIG_GEMINI_API_KEY;
++        }
+         if (api_key.empty()) {
+             return "Web search is not set up: no Gemini API key in the firmware "
+-                   "(menuconfig > Xiaozhi Assistant > Gemini API key).";
++                   "(put it in main/boards/chan/gemini_secret.h).";
+         }
+         if (query.empty()) {
+             return "Empty search query.";
+--- a/.gitignore	2026-10-03 01:41:43.908337882 +0000
++++ b/.gitignore	2026-10-03 01:41:43.937076262 +0000
+@@ -18,3 +18,4 @@
+ *.bin
+ mmap_generate_*.h
+ .clangd
++main/boards/chan/gemini_secret.h
+--- /dev/null	2026-10-02 21:36:15.721467443 +0000
++++ b/main/boards/chan/gemini_secret.h	2026-10-03 01:41:43.937195502 +0000
+@@ -0,0 +1,9 @@
++#ifndef GEMINI_SECRET_H
++#define GEMINI_SECRET_H
++
++// Paste your Gemini API key between the quotes. This file is git-ignored on purpose:
++// do not commit it, do not paste the key in chats, and do not share the built .bin
++// (the key is compiled into the firmware).
++#define GEMINI_API_KEY_LOCAL "PASTE_YOUR_GEMINI_API_KEY_HERE"
++
++#endif  // GEMINI_SECRET_H

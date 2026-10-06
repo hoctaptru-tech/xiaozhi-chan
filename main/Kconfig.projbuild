@@ -6,6 +6,21 @@ config OTA_URL
     help
         The application will access this URL to check for new firmwares and server address.
 
+config GEMINI_API_KEY
+    string "Gemini API key (web search tool)"
+    default ""
+    help
+        API key for the self.search.web tool (Gemini with Google Search).
+        Create one in Google AI Studio. It is stored in sdkconfig (git-ignored) and
+        compiled into the firmware, so do not share the built .bin file.
+        Leave empty to disable web search.
+
+config GEMINI_MODEL
+    string "Gemini model for web search"
+    default "gemini-3.6-flash"
+    help
+        Model name used by the web search tool, for example gemini-3.6-flash.
+
 choice
     prompt "Flash Assets"
     default FLASH_DEFAULT_ASSETS if !USE_EMOTE_MESSAGE_STYLE

@@ -276,6 +276,18 @@ void Application::Run() {
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
 
+            // No greeting from the server in time: stop waiting and start listening
+            if (awaiting_greeting_ && GetDeviceState() == kDeviceStateListening &&
+                clock_ticks_ >= kGreetingWaitSeconds) {
+                ESP_LOGW(TAG, "No greeting from server, start listening");
+                awaiting_greeting_ = false;
+                if (listening_mode_ == kListeningModeAutoStop && !audio_service_.IsPlaybackIdle()) {
+                    pending_listening_start_ = true;
+                } else {
+                    StartListeningAudio();
+                }
+            }
+
             // Print debug info every 10 seconds
             if (clock_ticks_ % 10 == 0) {
                 SystemInfo::PrintHeapStats();
@@ -983,6 +995,8 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
     }
     // Set the chat state to wake word detected
     protocol_->SendWakeWordDetected(wake_word);
+    // Greet first: keep the mic closed until the server's greeting has been spoken
+    awaiting_greeting_ = true;
     SetListeningMode(GetDefaultListeningMode());
 #else
     // Set flag to play popup sound after state changes to listening
@@ -1016,6 +1030,7 @@ void Application::HandleStateChangedEvent() {
                 display->SetEmotion(
                     "neutral");  // Then set emotion (wechat mode checks child count)
             }
+            awaiting_greeting_ = false;
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(true);
             break;
@@ -1027,6 +1042,13 @@ void Application::HandleStateChangedEvent() {
         case kDeviceStateListening:
             display->SetStatus(Lang::Strings::LISTENING);
             display->SetEmotion("neutral");
+
+            if (awaiting_greeting_) {
+                // Wait for the greeting: the tts "start" message clears this flag, and the
+                // normal Speaking -> Listening transition then opens the mic. The clock tick
+                // opens it anyway if the server never greets (see Run()).
+                break;
+            }
 
             // Make sure the audio processor is running
             if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) {
@@ -1045,6 +1067,7 @@ void Application::HandleStateChangedEvent() {
             break;
         case kDeviceStateSpeaking:
             display->SetStatus(Lang::Strings::SPEAKING);
+            awaiting_greeting_ = false;  // the greeting has started
 
             if (listening_mode_ != kListeningModeRealtime) {
                 audio_service_.EnableVoiceProcessing(false);

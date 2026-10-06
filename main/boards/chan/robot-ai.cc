@@ -13,6 +13,7 @@
 #include "motor_controller.h"
 #include "motor_arbiter.h"
 #include "robot_gestures.h"
+#include "gemini_search.h"
 
 #include <driver/rtc_io.h>
 #include <esp_sleep.h>
@@ -240,6 +241,18 @@ private:
 
     void InitializeTools() {
         auto& mcp_server = McpServer::GetInstance();
+
+        mcp_server.AddTool(
+            "self.search.web",
+            "Search the Internet (Google Search through Gemini) for current information: news, "
+            "weather, prices, sports results, recent events, or anything you are not sure about. "
+            "Takes a few seconds. Returns a short answer; tell it to the user in your own words.",
+            PropertyList({
+                Property("query", kPropertyTypeString),
+            }),
+            [](const PropertyList& properties) -> ReturnValue {
+                return GeminiSearch::Search(properties["query"].value<std::string>());
+            });
 
         mcp_server.AddTool(
             "self.robot.set_gestures",
